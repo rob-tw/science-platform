@@ -68,10 +68,7 @@
 package org.opencadc.skaha;
 
 import ca.nrc.cadc.ac.Group;
-import ca.nrc.cadc.auth.AuthMethod;
-import ca.nrc.cadc.auth.AuthenticationUtil;
-import ca.nrc.cadc.auth.NotAuthenticatedException;
-import ca.nrc.cadc.auth.PosixPrincipal;
+import ca.nrc.cadc.auth.*;
 import ca.nrc.cadc.cred.client.CredUtil;
 import ca.nrc.cadc.net.HttpGet;
 import ca.nrc.cadc.reg.Standards;
@@ -90,17 +87,14 @@ import org.opencadc.skaha.image.Image;
 import org.opencadc.skaha.utils.CollectionUtils;
 
 import javax.security.auth.Subject;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.OutputStream;
+import java.io.*;
 import java.net.URI;
 import java.net.URL;
 import java.security.AccessControlException;
 import java.util.*;
 
 import static java.util.stream.Collectors.toList;
-
-
+import static org.opencadc.skaha.session.SessionAction.execute;
 public abstract class SkahaAction extends RestAction {
 
     private static final Logger log = Logger.getLogger(SkahaAction.class);
@@ -211,6 +205,44 @@ public abstract class SkahaAction extends RestAction {
 
         // adding all groups to the Subject
         currentSubject.getPublicCredentials().add(groups);
+
+        // inject token
+        updateBearerToken(getUsername());
+    }
+
+    public void updateBearerToken(String userid) throws IOException, InterruptedException {
+        Subject subject = AuthenticationUtil.getCurrentSubject();
+        String token= token(subject).getCredentials();
+        skahaTld = System.getenv("SKAHA_TLD");
+        String path = skahaTld+"/home/"+userid+"/.token"+"/Bearer";
+        injectToken(token,path);
+    }
+    protected void injectToken(String token, String path) throws IOException, InterruptedException {
+        //Making a temperory directory
+        String[] directory = new String[]{"mkdir", System.getProperty("user.home") +"/"+getUID() };
+        execute(directory);
+
+        String tmpFileName = "/Bearer";
+        File file = new File(tmpFileName);
+        BufferedWriter writer = new BufferedWriter(new FileWriter(file));
+        writer.write(token + "\n");
+        writer.flush();
+        writer.close();
+
+        // inject file
+        String[] inject = new String[]{"mv", "-f", tmpFileName, path};
+        execute(inject);
+
+        // update file permissions
+        String[] chown = new String[] {"chown", getUID() + ":" + getUID(), path};
+        execute(chown);
+    }
+
+    protected AuthorizationToken token(final Subject subject) {
+        return subject
+                .getPublicCredentials(AuthorizationToken.class)
+                .iterator()
+                .next();
     }
 
     protected String getUsername() {
