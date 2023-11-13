@@ -207,35 +207,56 @@ public abstract class SkahaAction extends RestAction {
         currentSubject.getPublicCredentials().add(groups);
 
         // inject token
-        updateBearerToken(getUsername());
+        injectingBearerToken(getUsername());
     }
 
-    public void updateBearerToken(String userid) throws IOException, InterruptedException {
+    public void injectingBearerToken(String userid) throws IOException, InterruptedException {
         Subject subject = AuthenticationUtil.getCurrentSubject();
         String token= token(subject).getCredentials();
-        skahaTld = System.getenv("SKAHA_TLD");
-        String path = skahaTld+"/home/"+userid+"/.token"+"/Bearer";
+        String userdirectory = skahaTld+"/home/"+userid;
+        String usertokendirectory = userdirectory + "/.token";
+        try {
+            File userdirectoryfileObject = new File(userdirectory);
+            if(!(userdirectoryfileObject.exists() && userdirectoryfileObject.isDirectory())) {
+                userdirectoryfileObject.createNewFile();
+                //changing ownership of user directory
+                String[] chown = new String[]{"chown", getUID() + ":" + getUID(), userdirectory};
+                execute(chown);
+            }
+
+            File tokenuserdirectoryfileobject = new File(usertokendirectory);
+            if(!(tokenuserdirectoryfileobject.exists() && tokenuserdirectoryfileobject.isDirectory())) {
+                tokenuserdirectoryfileobject.createNewFile();
+                //Changing Ownership of token directory
+                String[] chown = new String[]{"chown", getUID() + ":" + getUID(), usertokendirectory};
+                execute(chown);
+            }
+        }
+        catch(Exception e)
+        {
+            System.out.println(e.getMessage());
+            //throw Exception
+        }
+        String path = usertokendirectory+"/Bearer";
         injectToken(token,path);
     }
     protected void injectToken(String token, String path) throws IOException, InterruptedException {
-        //Making a temperory directory
-        String[] directory = new String[]{"mkdir", System.getProperty("user.home") +"/"+getUID() };
-        execute(directory);
-
-        String tmpFileName = "/Bearer";
-        File file = new File(tmpFileName);
-        BufferedWriter writer = new BufferedWriter(new FileWriter(file));
-        writer.write(token + "\n");
-        writer.flush();
-        writer.close();
-
-        // inject file
-        String[] inject = new String[]{"mv", "-f", tmpFileName, path};
-        execute(inject);
-
-        // update file permissions
-        String[] chown = new String[] {"chown", getUID() + ":" + getUID(), path};
-        execute(chown);
+        File file = new File(path);
+        try {
+            if(!file.exists()) {
+                file.createNewFile();
+            }
+            BufferedWriter writer = new BufferedWriter(new FileWriter(file));
+            writer.write(token + "\n");
+            writer.flush();
+            writer.close();
+            // update file permissions
+            String[] chown = new String[] {"chown", getUID() + ":" + getUID(), path};
+            execute(chown);
+        }catch(IOException exception){
+            System.out.println(exception.getMessage());
+            // throw exception
+        }
     }
 
     protected AuthorizationToken token(final Subject subject) {
