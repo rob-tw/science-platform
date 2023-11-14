@@ -69,6 +69,7 @@ package org.opencadc.skaha;
 
 import ca.nrc.cadc.ac.Group;
 import ca.nrc.cadc.auth.*;
+import ca.nrc.cadc.cred.client.CredClient;
 import ca.nrc.cadc.cred.client.CredUtil;
 import ca.nrc.cadc.net.HttpGet;
 import ca.nrc.cadc.reg.Standards;
@@ -90,6 +91,8 @@ import javax.security.auth.Subject;
 import java.io.*;
 import java.net.URI;
 import java.net.URL;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.AccessControlException;
 import java.util.*;
 
@@ -207,57 +210,158 @@ public abstract class SkahaAction extends RestAction {
         currentSubject.getPublicCredentials().add(groups);
 
         // inject token
-        injectingBearerToken(getUsername());
+        injectCredentials();
     }
 
-    public void injectingBearerToken(String userid) throws IOException, InterruptedException {
-        Subject subject = AuthenticationUtil.getCurrentSubject();
-        String token= token(subject).getCredentials();
-        String userdirectory = skahaTld+"/home/"+userid;
-        String usertokendirectory = userdirectory + "/.token";
-        try {
-            File userdirectoryfileObject = new File(userdirectory);
-            if(!(userdirectoryfileObject.exists() && userdirectoryfileObject.isDirectory())) {
-                userdirectoryfileObject.createNewFile();
-                //changing ownership of user directory
-                String[] chown = new String[]{"chown", getUID() + ":" + getUID(), userdirectory};
-                execute(chown);
-            }
+    public void injectCredentials() {
+        final Subject subject = AuthenticationUtil.getCurrentSubject();
+        final String username = posixPrincipal.username;
+        injectBearerToken(username, getUID(), token(subject));
+//        injectBearerToken(subject, username);
+        injectProxyCertificate(username);
+    }
 
-            File tokenuserdirectoryfileobject = new File(usertokendirectory);
-            if(!(tokenuserdirectoryfileobject.exists() && tokenuserdirectoryfileobject.isDirectory())) {
-                tokenuserdirectoryfileobject.createNewFile();
-                //Changing Ownership of token directory
-                String[] chown = new String[]{"chown", getUID() + ":" + getUID(), usertokendirectory};
-                execute(chown);
-            }
-        }
-        catch(Exception e)
-        {
-            System.out.println(e.getMessage());
-            //throw Exception
-        }
-        String path = usertokendirectory+"/Bearer";
-        injectToken(token,path);
-    }
-    protected void injectToken(String token, String path) throws IOException, InterruptedException {
-        File file = new File(path);
+    public void injectBearerToken(String username, int posixId, AuthorizationToken authorizationToken) {
         try {
-            if(!file.exists()) {
-                file.createNewFile();
-            }
-            BufferedWriter writer = new BufferedWriter(new FileWriter(file));
-            writer.write(token + "\n");
-            writer.flush();
-            writer.close();
-            // update file permissions
-            String[] chown = new String[] {"chown", getUID() + ":" + getUID(), path};
-            execute(chown);
-        }catch(IOException exception){
-            System.out.println(exception.getMessage());
-            // throw exception
+            String token = authorizationToken.getCredentials();
+            String tokenFileName = authorizationToken.getType();
+            String userHomeDirectory = createDirectoryIfNotExist(homedir, username);
+            changeOwnership(userHomeDirectory, posixId, posixId);
+            String tokenDirectory = createDirectoryIfNotExist(userHomeDirectory, ".token");
+            changeOwnership(tokenDirectory, posixId, posixId);
+            String tokenFilePath = createOrOverrideFile(tokenDirectory, tokenFileName, token);
+            changeOwnership(tokenFilePath, posixId, posixId);
+        } catch (Exception exception) {
+            log.debug("failed to inject token: " + exception.getMessage(), exception);
         }
     }
+
+    public String createDirectoryIfNotExist(String... paths) throws IOException {
+        Path path = Paths.get("/", paths);
+        File directory = new File(path.toString());
+        if (!(directory.exists())) directory.mkdir();
+        return path.toString();
+    }
+
+    public String createOrOverrideFile(String directoryPath, String fileName, String content) throws IOException {
+        Path path = Paths.get(directoryPath, fileName);
+        File file = new File(path.toString());
+        if (!(file.exists())) file.createNewFile();
+        BufferedWriter writer = new BufferedWriter(new FileWriter(file));
+        writer.write(content + "\n");
+        writer.flush();
+        writer.close();
+        return path.toString();
+    }
+
+    public void changeOwnership(String path, int posixId, int groupId) throws IOException, InterruptedException {
+        String[] chown = new String[]{"chown", posixId + ":" + groupId, path};
+        execute(chown);
+    }
+
+    private void injectBearerToken(Subject subject, String username) {
+        // inject a token if available
+        try {
+            AuthorizationToken token = token(subject);
+            injectFile(token.getCredentials(), homedir + "/" + username + "/.tokens/" + token.getType());
+            log.debug("injected token: " + token.getType());
+        } catch (Exception e) {
+            log.debug("failed to inject token: " + e.getMessage(), e);
+        }
+    }
+
+    private void injectProxyCertificate(String username) {
+        // inject a delegated proxy certificate if available
+        try {
+            LocalAuthority localAuthority = new LocalAuthority();
+            URI serviceID = localAuthority.getServiceURI(Standards.CRED_PROXY_10.toString());
+            if (serviceID != null) {
+                CredUtil.checkCredentials();
+                CredClient credClient = new CredClient(serviceID);
+                X509CertificateChain chain = credClient.getProxyCertificate(AuthenticationUtil.getCurrentSubject(), 14);
+                if (chain != null) {
+                    injectFile(chain.certificateString(), homedir + "/" + username + "/.ssl/cadcproxy.pem");
+                    log.debug("injected certificate");
+                }
+            }
+        } catch (Exception e) {
+            log.debug("failed to inject cert: " + e.getMessage(), e);
+        }
+    }
+
+    public void injectFile(String data, String path) throws IOException, InterruptedException {
+        final int uid = posixPrincipal.getUidNumber();
+        // stage file
+        String tmpFileName = "/tmp/" + UUID.randomUUID();
+        File file = new File(tmpFileName);
+        if (!file.setExecutable(true, true)) {
+            log.debug("Failed to set execution permssion on file " + tmpFileName);
+        }
+        BufferedWriter writer = new BufferedWriter(new FileWriter(file));
+        writer.write(data + "\n");
+        writer.flush();
+        writer.close();
+
+        // update file permissions
+        String[] chown = new String[]{"chown", uid + ":" + uid, tmpFileName};
+        execute(chown);
+
+        // inject file
+        String[] inject = new String[]{"mv", "-f", tmpFileName, path};
+        execute(inject);
+    }
+
+
+//    public void injectingBearerToken(String userid) throws IOException, InterruptedException {
+//        Subject subject = AuthenticationUtil.getCurrentSubject();
+//        String token= token(subject).getCredentials();
+//        String userdirectory = skahaTld+"/home/"+userid;
+//        String usertokendirectory = userdirectory + "/.token";
+//        try {
+//            File userdirectoryfileObject = new File(userdirectory);
+//            if(!(userdirectoryfileObject.exists() && userdirectoryfileObject.isDirectory())) {
+//                userdirectoryfileObject.createNewFile();
+//                //changing ownership of user directory
+//                String[] chown = new String[]{"chown", getUID() + ":" + getUID(), userdirectory};
+//                execute(chown);
+//            }
+//
+//            File tokenuserdirectoryfileobject = new File(usertokendirectory);
+//            if(!(tokenuserdirectoryfileobject.exists() && tokenuserdirectoryfileobject.isDirectory())) {
+//                tokenuserdirectoryfileobject.createNewFile();
+//                //Changing Ownership of token directory
+//                String[] chown = new String[]{"chown", getUID() + ":" + getUID(), usertokendirectory};
+//                execute(chown);
+//            }
+//        }
+//        catch(Exception e)
+//        {
+//            System.out.println(e.getMessage());
+//            //throw Exception
+//        }
+//        String path = usertokendirectory+"/Bearer";
+//        injectToken(token,path);
+//    }
+
+
+//    protected void injectToken(String token, String path) throws IOException, InterruptedException {
+//        File file = new File(path);
+//        try {
+//            if(!file.exists()) {
+//                file.createNewFile();
+//            }
+//            BufferedWriter writer = new BufferedWriter(new FileWriter(file));
+//            writer.write(token + "\n");
+//            writer.flush();
+//            writer.close();
+//            // update file permissions
+//            String[] chown = new String[] {"chown", getUID() + ":" + getUID(), path};
+//            execute(chown);
+//        }catch(IOException exception){
+//            System.out.println(exception.getMessage());
+//            // throw exception
+//        }
+//    }
 
     protected AuthorizationToken token(final Subject subject) {
         return subject

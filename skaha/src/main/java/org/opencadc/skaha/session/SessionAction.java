@@ -67,23 +67,14 @@
 
 package org.opencadc.skaha.session;
 
-import ca.nrc.cadc.auth.AuthenticationUtil;
-import ca.nrc.cadc.auth.AuthorizationToken;
-import ca.nrc.cadc.auth.X509CertificateChain;
-import ca.nrc.cadc.cred.client.CredClient;
-import ca.nrc.cadc.cred.client.CredUtil;
 import ca.nrc.cadc.net.ResourceNotFoundException;
-import ca.nrc.cadc.reg.Standards;
-import ca.nrc.cadc.reg.client.LocalAuthority;
 import ca.nrc.cadc.util.StringUtil;
 import org.apache.log4j.Logger;
 import org.opencadc.skaha.K8SUtil;
 import org.opencadc.skaha.SkahaAction;
 
-import javax.security.auth.Subject;
 import java.io.*;
 import java.net.MalformedURLException;
-import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
@@ -246,44 +237,7 @@ public abstract class SessionAction extends SkahaAction {
         return "https://" + host + "/session/contrib/" + sessionID + "/";
     }
 
-    protected AuthorizationToken token(final Subject subject) {
-        return subject
-                .getPublicCredentials(AuthorizationToken.class)
-                .iterator()
-                .next();
-    }
 
-    
-    protected void injectCredentials() {
-        final Subject subject = AuthenticationUtil.getCurrentSubject();
-        final String username = posixPrincipal.username;
-        // inject a token if available
-        try {
-            AuthorizationToken token = token(subject);
-            injectFile(token.getCredentials(), homedir + "/" + username + "/.tokens/" + token.getType());
-            log.debug("injected token: " + token.getType());
-        } catch (Exception e) {
-            log.debug("failed to inject token: " + e.getMessage(), e);
-        }
-        
-        // inject a delegated proxy certificate if available
-        try {
-            LocalAuthority localAuthority = new LocalAuthority();
-            URI serviceID = localAuthority.getServiceURI(Standards.CRED_PROXY_10.toString());
-            if (serviceID != null) {
-                CredUtil.checkCredentials();
-                CredClient credClient = new CredClient(serviceID);
-                X509CertificateChain chain = credClient.getProxyCertificate(AuthenticationUtil.getCurrentSubject(), 14);
-                if (chain != null) {
-                    injectFile(chain.certificateString(), homedir + "/" + username + "/.ssl/cadcproxy.pem");
-                    log.debug("injected certificate");
-                }
-            }
-        } catch (Exception e) {
-            log.debug("failed to inject cert: " + e.getMessage(), e);
-        }
-    }
-    
     protected String getImageName(String image) {
         try {
             // return the last segment of the path
@@ -301,29 +255,8 @@ public abstract class SessionAction extends SkahaAction {
         }
 
     }
-    
-    protected void injectFile(String data, String path) throws IOException, InterruptedException {
-        final int uid = posixPrincipal.getUidNumber();
-        // stage file
-        String tmpFileName = "/tmp/" + UUID.randomUUID();
-        File file = new File(tmpFileName);
-        if (!file.setExecutable(true, true)) {
-            log.debug("Failed to set execution permssion on file " + tmpFileName);
-        }
-        BufferedWriter writer = new BufferedWriter(new FileWriter(file));
-        writer.write(data + "\n");
-        writer.flush();
-        writer.close();
-        
-        // update file permissions
-        String[] chown = new String[] {"chown", uid + ":" + uid, tmpFileName};
-        execute(chown);
 
-        // inject file
-        String[] inject = new String[] {"mv",  "-f", tmpFileName, path};
-        execute(inject);
-    }
-    
+
     protected String stageFile(String data) throws IOException {
         String tmpFileName = "/tmp/" + UUID.randomUUID();
         File file = new File(tmpFileName);
